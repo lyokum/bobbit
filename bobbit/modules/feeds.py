@@ -3,12 +3,10 @@
 import dbm.gnu
 import collections
 import logging
-import os
 import time
 
 import aiohttp
 import feedparser
-import yaml
 
 from bobbit.message import Message
 from bobbit.utils   import shorten_url, strip_html
@@ -30,13 +28,13 @@ async def process_feed(http_client, feed, cache):
     logging.info('Fetching %s (%s)', feed_title, feed_url)
     try:
         async with http_client.get(feed_url) as response:
-            text = await response.text()
+            feed_content = await response.content.read()
     except aiohttp.client_exceptions.ClientPayloadError as e:
         logging.warning('Could not fetch %s: %s', feed_url, e)
         return
 
     logging.info('Parsing %s (%s)', feed_title, feed_url)
-    for entry in feedparser.parse(text)['entries']:
+    for entry in feedparser.parse(feed_content)['entries']:
         link   = entry.get('link', '')
         title  = strip_html(entry.get('title', ''))
         author = entry.get('author', 'Unknown')
@@ -90,27 +88,25 @@ async def feeds_timer(bot):
     logging.info('Feeds timer starting...')
 
     # Read configuration
-    try:
-        config_path      = os.path.join(bot.config.config_dir, 'feeds.yaml')
-        feeds_config     = yaml.safe_load(open(config_path))
-        templates        = feeds_config.get('templates', {})
-        default_template = templates.get('default', TEMPLATE)
-    except (IOError, OSError) as e:
-        logging.warning(e)
-        return
+    config           = bot.config.load_module_config('feeds')
+    templates        = config.get('templates', {})
+    default_template = templates.get('default', TEMPLATE)
 
     # Read and process results
     entries       = collections.defaultdict(list)
-    entries_limit = feeds_config.get('limit', 5)
-    cache_path    = os.path.join(bot.config.config_dir, 'feeds.cache')
+    entries_limit = config.get('limit', 5)
+    cache_path    = bot.config.get_config_path('feeds.cache')
 
     with dbm.open(cache_path, 'c') as cache:
         logging.debug('Processing feeds...')
-        for feed in feeds_config['feeds']:
+        for feed in config['feeds']:
             feed_title = feed['title']
 
-            async for feed_entry in process_feed(bot.http_client, feed, cache):
-                entries[feed_title].append(feed_entry)
+            try:
+                async for feed_entry in process_feed(bot.http_client, feed, cache):
+                    entries[feed_title].append(feed_entry)
+            except Exception as e:
+                logging.warning('Unable to process feed %s: %s', feed_title, e)
 
         logging.debug('Delivering feeds...')
         for feed_title, entries in entries.items():
@@ -151,13 +147,8 @@ async def feeds_timer(bot):
 # Register
 
 def register(bot):
-    try:
-        config_path  = os.path.join(bot.config.config_dir, 'feeds.yaml')
-        feeds_config = yaml.safe_load(open(config_path))
-        timeout      = feeds_config.get('timeout', 5*60)
-    except (IOError, OSError) as e:
-        logging.warning(e)
-        return []
+    config  = bot.config.load_module_config('feeds')
+    timeout = config.get('timeout', 5*60)
 
     return (
         ('timer', timeout, feeds_timer),
